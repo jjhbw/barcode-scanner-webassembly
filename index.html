@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<title>barcode scanner wasm</title>
+</head>
+
+<!-- We create some DOM elements necessary for grabbing webcam frames -->
+<body>
+	<div>
+		<!-- note that we hide the live video element using 'display:none', that way only the canvas is rendered -->
+		<video id="live" width="320" height="240" autoplay style="border:5px solid #000000; display:none;"> </video>
+		<canvas id="canvas" style="border:5px solid #000000"> </canvas>
+	</div>
+
+</body>
+
+<!-- Import the javascript bundle produced by Emscripten-->
+<script src="/a.out.js"></script>
+
+<!-- The main 'application code' tying it all together -->
+<script>
+
+// Execute the application code when the WebAssembly module is ready.
+Module.onRuntimeInitialized = async _ => {
+    
+// wrap all C functions using cwrap. Note that we have to provide crwap with the function signature.
+const api = {
+	scan_image: Module.cwrap('scan_image', '', ['number', 'number', 'number']),
+	create_buffer: Module.cwrap('create_buffer', 'number', ['number', 'number']),
+	destroy_buffer: Module.cwrap('destroy_buffer', '', ['number']),
+};
+
+const video = document.getElementById("live");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext('2d');
+const desiredWidth = 1280;
+const desiredHeight = 720;
+
+// settings for the getUserMedia call
+const constraints = {
+	video: {
+		// the browser will try to honor this resolution, but it may end up being lower.
+		width: desiredWidth,
+		height: desiredHeight
+	}
+};
+
+// open the webcam stream
+navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+	// stream is a MediaStream object
+	video.srcObject = stream;
+	video.play();
+
+	// tell the canvas which resolution we ended up getting from the webcam
+	const track = stream.getVideoTracks()[0];
+	const actualSettings = track.getSettings();
+	console.log(actualSettings.width, actualSettings.height)
+	canvas.width = actualSettings.width;
+	canvas.height = actualSettings.height;
+
+	// every k milliseconds, we draw the contents of the video to the canvas and run the detector.
+	const timer = setInterval(detectSymbols, 250);
+
+}).catch((e) => {
+	throw e
+});
+
+function detectSymbols() {
+	// grab a frame from the media source and draw it to the canvas
+	ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+	// get the image data from the canvas
+	const image = ctx.getImageData(0, 0, canvas.width, canvas.height)
+
+	// convert the image data to grayscale 
+	const grayData = []
+	const d = image.data;
+	for (var i = 0, j = 0; i < d.length; i += 4, j++) {
+		grayData[j] = (d[i] * 66 + d[i + 1] * 129 + d[i + 2] * 25 + 4096) >> 8;
+	}
+
+	// put the data into the allocated buffer on the wasm heap.
+	const p = api.create_buffer(image.width, image.height);
+	Module.HEAP8.set(grayData, p);
+
+	// call the scanner function
+	api.scan_image(p, image.width, image.height)
+
+	// clean up 
+    //(this is not really necessary in this example as we could reuse the buffer, but is used to demonstrate how you can manage Wasm heap memory from the js environment)
+	api.destroy_buffer(p);
+
+}
+
+function drawPoly(ctx, poly) {
+// drawPoly expects a flat array of coordinates forming a polygon (e.g. [x1,y1,x2,y2,... etc])
+	ctx.beginPath();
+	ctx.moveTo(poly[0], poly[1]);
+	for (item = 2; item < poly.length - 1; item += 2) { ctx.lineTo(poly[item], poly[item + 1]) }
+
+	ctx.lineWidth = 2;
+	ctx.strokeStyle = "#FF0000";
+	ctx.closePath();
+	ctx.stroke();
+}
+
+// render the string contained in the barcode as text on the canvas
+function renderData(ctx, data, x, y) {
+	ctx.font = "15px Arial";
+	ctx.fillStyle = "red";
+	ctx.fillText(data, x, y);
+}
+
+// set the function that should be called whenever a barcode is detected
+Module['processResult'] = (symbol, data, polygon) => {
+	console.log("Data liberated from WASM heap:")
+	console.log(symbol)
+	console.log(data)
+	console.log(polygon)
+
+	// draw the bounding polygon
+	drawPoly(ctx, polygon)
+
+	// render the data at the first coordinate of the polygon
+	renderData(ctx, data, polygon[0], polygon[1] - 10)
+}
+
+}
+</script>
+
+</html>
